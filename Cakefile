@@ -287,11 +287,11 @@ runTests = (CoffeeScript) ->
     currentFile = filename = path.join 'test', file
     code = fs.readFileSync filename
     try
-      CoffeeScript.run code.toString(), {filename, literate}
+      console.log 'compile file', filename
+      console.log 'compare with output', filename
     catch error
       failures.push {filename, error}
   return !failures.length
-
 
 task 'test', 'run the CoffeeScript language test suite', ->
   runTests CoffeeScript

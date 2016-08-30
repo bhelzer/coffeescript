@@ -1,14 +1,15 @@
 {
-  "name": "coffee-script",
-  "description": "Unfancy JavaScript",
+  "name": "ctot",
+  "description": "Convert CoffeeScript to TypeScript",
   "keywords": [
     "javascript",
+    "typescript",
     "language",
     "coffeescript",
     "compiler"
   ],
-  "author": "Jeremy Ashkenas",
-  "version": "1.10.0",
+  "author": "Bernd Helzer",
+  "version": "0.9",
   "license": "MIT",
   "engines": {
     "node": ">=0.8.0"
@@ -18,13 +19,13 @@
   },
   "main": "./lib/coffee-script/coffee-script",
   "bin": {
-    "coffee": "./bin/coffee",
+    "ctot": "./bin/ctot",
     "cake": "./bin/cake"
   },
-  "preferGlobal": true,
+  "preferGlobal": false,
   "scripts": {
-    "test":         "node ./bin/cake test",
-    "test-harmony": "node --harmony ./bin/cake test"
+    "test":         "node runtest.js",
+    "build":        "coffee -o lib/coffee-script -w -c src/*.coffee"
   },
   "homepage": "http://coffeescript.org",
   "bugs": "https://github.com/jashkenas/coffeescript/issues",

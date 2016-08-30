@@ -226,6 +226,7 @@ exports.Base = class Base
 exports.Block = class Block extends Base
   constructor: (nodes) ->
     @expressions = compact flatten nodes or []
+    @es6_class_definition = no
 
   children: ['expressions']
 
@@ -305,7 +306,7 @@ exports.Block = class Block extends Base
         compiledNodes.push node.compileToFragments o, LEVEL_LIST
     if top
       if @spaced
-        return [].concat @joinFragmentArrays(compiledNodes, '\n\n'), @makeCode("\n")
+        return [].concat @joinFragmentArrays(compiledNodes, '\n'), @makeCode("\n")
       else
         return @joinFragmentArrays(compiledNodes, '\n')
     if compiledNodes.length
@@ -357,12 +358,12 @@ exports.Block = class Block extends Base
       @expressions = rest
     post = @compileNode o
     {scope} = o
-    if scope.expressions is this
+    if scope.expressions is this and !@es6_class_definition
       declars = o.scope.hasDeclarations()
       assigns = scope.hasAssignments
       if declars or assigns
         fragments.push @makeCode '\n' if i
-        fragments.push @makeCode "#{@tab}var "
+        fragments.push @makeCode "#{@tab}let "
         if declars
           fragments.push @makeCode scope.declaredVariables().join(', ')
         if assigns
@@ -501,6 +502,7 @@ exports.Value = class Value extends Base
     @base       = base
     @properties = props or []
     @[tag]      = true if tag
+    @es6_static_function = no
     return this
 
   children: ['base', 'properties']
@@ -582,10 +584,14 @@ exports.Value = class Value extends Base
   compileNode: (o) ->
     @base.front = @front
     props = @properties
-    fragments = @base.compileToFragments o, (if props.length then LEVEL_ACCESS else null)
-    if props.length and SIMPLENUM.test fragmentsToText fragments
-      fragments.push @makeCode '.'
+    if not @es6_static_function or o.scope.method.klass
+      fragments = @base.compileToFragments o, (if props.length then LEVEL_ACCESS else null)
+      if props.length and SIMPLENUM.test fragmentsToText fragments
+        fragments.push @makeCode '.'
+    else
+      fragments = []
     for prop in props
+      prop.es6_static_function = @es6_static_function
       fragments.push (prop.compileToFragments o)...
     fragments
 
@@ -605,6 +611,69 @@ exports.Value = class Value extends Base
           snd.base = ref
         return new If new Existence(fst), snd, soak: on
       no
+
+#### ES6PrototypeVariable
+
+exports.ES6PrototypeVariable = class ES6PrototypeVariable extends Value
+  constructor: (base, props, tag) ->
+    #console.log "ES6PrototypeVariable\nbase=#{base}\nprops=#{props}\ntag=#{tag}"
+    super(base, props, tag)
+
+  compileNode: (o) ->
+    @base.front = @front
+    fragments = []
+    fragments.push @makeCode 'get '
+    [..., name] = @properties
+    fragments.push (name.compileToFragments o)...
+    fragments.push @makeCode '()'
+    fragments
+
+#### ES6PrototypeValueReturn
+
+exports.ES6PrototypeValueReturn = class ES6PrototypeValueReturn extends Base
+  constructor: (value) ->
+    #console.log "ES6PrototypeValueReturn\nvalue=#{value}"
+    super(value)
+    @value = value
+
+  compileNode: (o) ->
+    fragments = []
+    fragments.push @makeCode "{\n#{@tab}#{@tab}return "
+    o.indent += TAB
+    fragments.push (@value.compileToFragments o)...
+    o.indent -= TAB
+    fragments.push @makeCode ";\n#{@tab}}"
+    fragments
+
+#### ES6PrototypeVariable
+
+exports.ES6PrototypeVariable = class ES6PrototypeVariable extends Value
+  constructor: (base, props, tag) ->
+    #console.log "ES6PrototypeVariable\nbase=#{base}\nprops=#{props}\ntag=#{tag}"
+    super(base, props, tag)
+
+  compileNode: (o) ->
+    @base.front = @front
+    fragments = []
+    fragments.push @makeCode 'get '
+    [..., name] = @properties
+    fragments.push (name.compileToFragments o)...
+    fragments.push @makeCode '()'
+    fragments
+
+#### ES6PrototypeCode
+
+exports.ES6PrototypeCode = class ES6PrototypeCode extends Value
+  constructor: (base, props, tag) ->
+    #console.log "ES6PrototypeCode\nbase=#{base}\nprops=#{props}\ntag=#{tag}"
+    super(base, props, tag)
+
+  compileNode: (o) ->
+    @base.front = @front
+    fragments = []
+    [..., name] = @properties
+    fragments.push (name.compileToFragments o)...
+    fragments
 
 #### Comment
 
@@ -687,9 +756,20 @@ exports.Call = class Call extends Base
 
     fragments = []
     if this instanceof SuperCall
-      preface = @superReference(o) + ".call(#{@superThis(o)}"
-      if compiledArgs.length then preface += ", "
-      fragments.push @makeCode preface
+      es6_super_call = yes
+      if es6_super_call
+        method = o.scope.namedMethod()
+        if method?.klass
+          {klass, name, variable} = method
+          fragments = name.compileToFragments o
+          fragments.unshift @makeCode "super."
+        else
+          fragments.push @makeCode "super"
+        fragments.push @makeCode "("
+      else
+        preface = @superReference(o) + ".call(#{@superThis(o)}"
+        if compiledArgs.length then preface += ", "
+        fragments.push @makeCode preface
     else
       if @isNew then fragments.push @makeCode 'new '
       fragments.push @variable.compileToFragments(o, LEVEL_ACCESS)...
@@ -714,7 +794,7 @@ exports.Call = class Call extends Base
       return [].concat @makeCode("""
         (function(func, args, ctor) {
         #{idt}ctor.prototype = func.prototype;
-        #{idt}var child = new ctor, result = func.apply(child, args);
+        #{idt}let child = new ctor, result = func.apply(child, args);
         #{idt}return Object(result) === result ? result : child;
         #{@tab}})("""),
         (@variable.compileToFragments o, LEVEL_LIST),
@@ -809,6 +889,7 @@ exports.Access = class Access extends Base
   constructor: (@name, tag) ->
     @name.asKey = yes
     @soak  = tag is 'soak'
+    @es6_static_function = no
 
   children: ['name']
 
@@ -818,6 +899,8 @@ exports.Access = class Access extends Base
     if node instanceof PropertyName
       if node.value in JS_FORBIDDEN
         [@makeCode('["'), name..., @makeCode('"]')]
+      else if @es6_static_function and not o.scope.method.klass
+        [name...]
       else
         [@makeCode('.'), name...]
     else
@@ -930,7 +1013,7 @@ exports.Range = class Range extends Base
     else
       vars    = "#{i} = #{@fromC}" + if @toC isnt @toVar then ", #{@toC}" else ''
       cond    = "#{@fromVar} <= #{@toVar}"
-      body    = "var #{vars}; #{cond} ? #{i} <#{@equals} #{@toVar} : #{i} >#{@equals} #{@toVar}; #{cond} ? #{i}++ : #{i}--"
+      body    = "let #{vars}; #{cond} ? #{i} <#{@equals} #{@toVar} : #{i} >#{@equals} #{@toVar}; #{cond} ? #{i}++ : #{i}--"
     post   = "{ #{result}.push(#{i}); }\n#{idt}return #{result};\n#{o.indent}"
     hasArgs = (node) -> node?.contains isLiteralArguments
     args   = ', arguments' if hasArgs(@from) or hasArgs(@to)
@@ -1131,7 +1214,10 @@ exports.Class = class Class extends Base
           if func.bound
             assign.error 'cannot define a constructor as a bound function'
           if func instanceof Code
-            assign = @ctor = func
+            assign.value = @ctor = func
+            assign.es6_prototype_declaration = yes
+            func.es6_prototype_function_declaration = yes
+            assign.variable = new ES6PrototypeCode(new IdentifierLiteral(name), [new Literal 'constructor'])
           else
             @externalCtor = o.classScope.freeVariable 'ctor'
             assign = new Assign new IdentifierLiteral(@externalCtor), func
@@ -1139,8 +1225,15 @@ exports.Class = class Class extends Base
           if assign.variable.this
             func.static = yes
           else
-            acc = if base.isComplex() then new Index base else new Access base
-            assign.variable = new Value(new IdentifierLiteral(name), [(new Access new PropertyName 'prototype'), acc])
+            # luis.es6
+            assign.es6_prototype_declaration = yes
+            acc = if base.isComplex() then new Index base else new Value base
+            if func instanceof Code
+                func.es6_prototype_function_declaration = yes
+                assign.variable = new ES6PrototypeCode(new IdentifierLiteral(name), [(new Access new PropertyName 'prototype'), acc])
+            else
+                assign.value = new ES6PrototypeValueReturn assign.value
+                assign.variable = new ES6PrototypeVariable(new IdentifierLiteral(name), [(new Access new PropertyName 'prototype'), acc])
             if func instanceof Code and func.bound
               @boundFuncs.push base
               func.bound = no
@@ -1199,29 +1292,51 @@ exports.Class = class Class extends Base
 
     name  = @determineName()
     lname = new IdentifierLiteral name
-    func  = new Code [], Block.wrap [@body]
+    block = Block.wrap [@body]
+    block.es6_class_definition = yes
+    func  = new Code [], block
+    func.es6_class_definition = yes
     args  = []
     o.classScope = func.makeScope o.scope
 
     @hoistDirectivePrologue()
     @setContext name
     @walkBody name, o
-    @ensureConstructor name
-    @addBoundFunctions o
+    @ensureConstructor name unless func.es6_class_definition
+    @addBoundFunctions o unless func.es6_class_definition
     @body.spaced = yes
-    @body.expressions.push lname
+    @body.expressions.push lname unless func.es6_class_definition
 
     if @parent
-      superClass = new IdentifierLiteral o.classScope.freeVariable 'superClass', reserve: no
-      @body.expressions.unshift new Extends lname, superClass
+      if func.es6_class_definition
+        superClass = new IdentifierLiteral @getFullyQualifiedSuperClassName()
+      else
+        superClass = new IdentifierLiteral o.classScope.freeVariable 'superClass', reserve: no
+        @body.expressions.unshift new Extends lname, superClass
       func.params.push new Param superClass
       args.push @parent
 
     @body.expressions.unshift @directives...
 
-    klass = new Parens new Call func, args
-    klass = new Assign @variable, klass if @variable
-    klass.compileToFragments o
+    if func.es6_class_definition
+      answer = []
+      answer.push @makeCode 'class '
+      answer.push @makeCode @variable.base.value
+      answer.push @makeCode ' extends ' unless not @parent
+      for fragment, index in func.compileToFragments o
+          answer.push fragment
+      answer
+    else
+      klass = new Parens new Call func, args
+      klass = new Assign @variable, klass if @variable
+      klass.compileToFragments o
+
+  getFullyQualifiedSuperClassName: ->
+    baseClassName = @parent.base.value
+    if @parent.properties?.length > 0
+        #console.log(@parent.properties[0].name.value)
+        baseClassName = baseClassName + '.' + @parent.properties[0].name.value
+    baseClassName
 
 #### Assign
 
@@ -1230,6 +1345,9 @@ exports.Class = class Class extends Base
 exports.Assign = class Assign extends Base
   constructor: (@variable, @value, @context, options = {}) ->
     {@param, @subpattern, @operatorToken} = options
+    if @variable.base instanceof ThisLiteral and @variable.properties and @variable.properties.length == 1 and @value instanceof Code
+      @variable.es6_static_function = yes
+      @value.es6_static_function = yes
 
   children: ['variable', 'value']
 
@@ -1269,7 +1387,7 @@ exports.Assign = class Assign extends Base
         @variable.error "'#{@variable.compile o}' can't be assigned"
       unless varBase.hasProperties?()
         if @param
-          o.scope.add varBase.value, 'var'
+          o.scope.add varBase.value, 'let'
         else
           o.scope.find varBase.value
     val = @value.compileToFragments o, LEVEL_LIST
@@ -1282,7 +1400,14 @@ exports.Assign = class Assign extends Base
         compiledName.push @makeCode '"'
       return compiledName.concat @makeCode(": "), val
 
-    answer = compiledName.concat @makeCode(" #{ @context or '=' } "), val
+    if @es6_prototype_declaration
+       signToken = ''
+    else if @value.es6_static_function and not o.scope.method.klass
+       signToken = ''
+       compiledName.unshift @makeCode "static "
+    else
+       signToken = '= '
+    answer = compiledName.concat @makeCode(" #{ @context or signToken }"), val
     if o.level <= LEVEL_LIST then answer else @wrapInBraces answer
 
   # Brief implementation of recursive pattern matching, when assigning array or
@@ -1451,6 +1576,9 @@ exports.Code = class Code extends Base
     @bound       = tag is 'boundfunc'
     @isGenerator = !!@body.contains (node) ->
       (node instanceof Op and node.isYield()) or node instanceof YieldReturn
+    @es6_class_definition = no
+    @es6_prototype_function_declaration = no
+    @es6_static_function = no
 
   children: ['params', 'body']
 
@@ -1466,17 +1594,59 @@ exports.Code = class Code extends Base
   # arrow, generates a wrapper that saves the current value of `this` through
   # a closure.
   compileNode: (o) ->
-
     if @bound and o.scope.method?.bound
       @context = o.scope.method.context
 
     # Handle bound functions early.
     if @bound and not @context
-      @context = '_this'
-      wrapper = new Code [new Param new IdentifierLiteral @context], new Block [this]
-      boundfunc = new Call(wrapper, [new ThisLiteral])
-      boundfunc.updateLocationDataIfMissing @locationData
-      return boundfunc.compileNode(o)
+      ###
+      luis.20160314 TODO
+
+      This is where we simplify lambda functions written in CoffeeScript like this:
+         delay(time_out, =>
+           @trigger('destroyed')
+           contact_table.update_numbers()
+         )
+
+      That are currently generated in ES5 like this:
+        return delay(time_out, (function(_this) {
+          return function() {
+            _this.trigger('destroyed');
+            return contact_table.update_numbers();
+          };
+        })(this));
+
+      To this in ES6:
+         delay(time_out, () => {
+           this.trigger('destroyed');
+           contact_table.update_numbers();
+         })
+
+      Another example in CoffeeScript:
+      onOpen: (iframe) =>
+        iframe.find('#name').val(@model.get('name') or "")
+
+      ES5:
+      onOpen: (function(_this) {
+        return function(iframe) {
+          return iframe.find('#name').val(_this.model.get('name') || "");
+        };
+      })(this)
+
+      ES6:
+      onOpen: (iframe) => {
+        iframe.find('#name').val(this.model.get('name') || "");
+      }
+      ###
+      @es6_needs_fat_arrow = yes
+      if @es6_needs_fat_arrow
+        @context = 'this'
+      else
+        @context = '_this'
+        wrapper = new Code [new Param new IdentifierLiteral @context], new Block [this]
+        boundfunc = new Call(wrapper, [new ThisLiteral])
+        boundfunc.updateLocationDataIfMissing @locationData
+        return boundfunc.compileNode(o)
 
     o.scope         = del(o, 'classScope') or @makeScope o.scope
     o.scope.shared  = del(o, 'sharedScope')
@@ -1487,9 +1657,9 @@ exports.Code = class Code extends Base
     exprs  = []
     for param in @params when param not instanceof Expansion
       o.scope.parameter param.asReference o
-    for param in @params when param.splat or param instanceof Expansion
+    for param in @params when param instanceof Expansion
       for p in @params when p not instanceof Expansion and p.name.value
-        o.scope.add p.name.value, 'var', yes
+        o.scope.add p.name.value, 'let', yes
       splats = new Assign new Value(new Arr(p.asReference o for p in @params)),
                           new Value new IdentifierLiteral 'arguments'
       break
@@ -1515,20 +1685,35 @@ exports.Code = class Code extends Base
     @eachParamName (name, node) ->
       node.error "multiple parameters named #{name}" if name in uniqs
       uniqs.push name
-    @body.makeReturn() unless wasEmpty or @noReturn
-    code = 'function'
-    code += '*' if @isGenerator
-    code += ' ' + @name if @ctor
-    code += '('
+    @body.makeReturn() unless wasEmpty or @noReturn or @es6_class_definition
+    if @es6_class_definition
+        code = ''
+    else if @es6_prototype_function_declaration or @es6_needs_fat_arrow or (@es6_static_function and o.scope.method.klass)
+        code = ''
+        code += '*' if @isGenerator
+        code += @name if @ctor
+        code += '('
+    else
+        code = 'function'
+        code += '*' if @isGenerator
+        code += ' ' + @name if @ctor
+        code += '('
     answer = [@makeCode(code)]
     for p, i in params
       if i then answer.push @makeCode ", "
       answer.push p...
-    answer.push @makeCode ') {'
+    if @es6_class_definition
+        answer.push @makeCode ' {\n'
+    else if @es6_needs_fat_arrow
+        answer.push @makeCode ') => {'
+    else
+        answer.push @makeCode ') {'
     answer = answer.concat(@makeCode("\n"), @body.compileWithDeclarations(o), @makeCode("\n#{@tab}")) unless @body.isEmpty()
     answer.push @makeCode '}'
 
     return [@makeCode(@tab), answer...] if @ctor
+    if @es6_class_definition
+        return answer
     if @front or (o.level >= LEVEL_ACCESS) then @wrapInBraces answer else answer
 
   eachParamName: (iterator) ->
@@ -1541,7 +1726,7 @@ exports.Code = class Code extends Base
 
 #### Param
 
-# A parameter in a function definition. Beyond a typical JavaScript parameter,
+# A parameter in a function definition. Beyond a typical Javascript parameter,
 # these parameters can also attach themselves to the context of the function,
 # as well as be a splat, gathering up a group of parameters into an array.
 exports.Param = class Param extends Base
@@ -2338,7 +2523,7 @@ UTILITIES =
   # to the superclass for `super()` calls, and copies of any static properties.
   extend: (o) -> "
     function(child, parent) {
-      for (var key in parent) {
+      for (let key in parent) {
         if (#{utility 'hasProp', o}.call(parent, key)) child[key] = parent[key];
       }
       function ctor() {
@@ -2363,7 +2548,7 @@ UTILITIES =
   # Discover if an item is in an array.
   indexOf: -> "
     [].indexOf || function(item) {
-      for (var i = 0, l = this.length; i < l; i++) {
+      for (let i = 0, l = this.length; i < l; i++) {
         if (i in this && this[i] === item) return i;
       }
       return -1;
@@ -2387,8 +2572,8 @@ LEVEL_COND   = 4  # ... ? x : y
 LEVEL_OP     = 5  # !...
 LEVEL_ACCESS = 6  # ...[0]
 
-# Tabs are two spaces for pretty printing.
-TAB = '  '
+# Tabs are four spaces for pretty printing.
+TAB = '    '
 
 SIMPLENUM = /^[+-]?\d+$/
 

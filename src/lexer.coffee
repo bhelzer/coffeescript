@@ -250,6 +250,12 @@ exports.Lexer = class Lexer
       if here.indexOf('\n') >= 0
         here = here.replace /// \n #{repeat ' ', @indent} ///g, '\n'
       @token 'HERECOMMENT', here, 0, comment.length
+    else
+      a=true 
+      # console.log 'TODO: Insert inline comment', JSON.stringify comment
+      # @token 'TERMINATOR', '\n', 0, 0
+      # @token 'HERECOMMENT', comment.substring(comment.indexOf('#')+1), 0, comment.length
+      #return comment.length + 1
     comment.length
 
   # Matches JavaScript interpolated directly into the source via backticks.
